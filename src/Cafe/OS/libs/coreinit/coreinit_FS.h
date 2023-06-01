@@ -12,6 +12,8 @@ typedef struct
 
 typedef MEMPTR<betype<FSDirHandle2>> FSDirHandlePtr;
 
+typedef uint32 FSAClientHandle;
+
 typedef struct
 {
 	MEMPTR<void>				userCallback;
@@ -239,6 +241,7 @@ namespace coreinit
 	#define FSA_CMD_OPERATION_TYPE_RENAME			(0x9)
 	#define FSA_CMD_OPERATION_TYPE_OPENDIR			(0xA)
 	#define FSA_CMD_OPERATION_TYPE_READDIR			(0xB)
+	#define FSA_CMD_OPERATION_TYPE_REWINDDIR        (0xC)
 	#define FSA_CMD_OPERATION_TYPE_CLOSEDIR			(0xD)
 	#define FSA_CMD_OPERATION_TYPE_OPENFILE			(0xE)
 	#define FSA_CMD_OPERATION_TYPE_READ				(0xF)
@@ -248,10 +251,12 @@ namespace coreinit
 	#define FSA_CMD_OPERATION_TYPE_ISEOF			(0x13)
 	#define FSA_CMD_OPERATION_TYPE_GETSTATFILE		(0x14)
 	#define FSA_CMD_OPERATION_TYPE_CLOSEFILE		(0x15)
-	#define FSA_CMD_OPERATION_TYPE_QUERYINFO	(0x18)
+	#define FSA_CMD_OPERATION_TYPE_FLUSHFILE	    (0x17)
+	#define FSA_CMD_OPERATION_TYPE_QUERYINFO	    (0x18)
 	#define FSA_CMD_OPERATION_TYPE_APPENDFILE		(0x19)
 	#define FSA_CMD_OPERATION_TYPE_TRUNCATEFILE		(0x1A)
 	#define FSA_CMD_OPERATION_TYPE_FLUSHQUOTA		(0x1E)
+	#define FSA_CMD_OPERATION_TYPE_CHANGEMODE		(0x20)
 
 
 	#define FSA_CMD_STATUS_CODE_D900A21				0xD900A21	// cmd block is initialized

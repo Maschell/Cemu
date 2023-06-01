@@ -9,6 +9,7 @@
 #include "Cafe/IOSU/iosu_ipc_common.h"
 #include "coreinit_IPC.h"
 #include "Cafe/Filesystem/fsc.h"
+#include "coreinit_IPCBuf.h"
 
 #define FS_CB_PLACEHOLDER_FINISHCMD	(MPTR)(0xF122330E)
 
@@ -182,7 +183,6 @@ namespace coreinit
 		fsCmdBlockBody->selfCmdBlock = fsCmdBlock;
 		return fsCmdBlockBody;
 	}
-
 
 	void __FSErrorAndBlock(std::string_view msg)
 	{
@@ -436,7 +436,7 @@ namespace coreinit
 
 	void __FSAIoctlResponseCallback(PPCInterpreter_t* hCPU);
 
-	void __FSAIPCSubmitCommandAsync(FSAShimBuffer* shimBuffer, const MEMPTR<void>& callback, void * context)
+	void __FSAIPCSubmitCommandAsync(FSAShimBuffer* shimBuffer, const MEMPTR<void>& callback, void* context)
 	{
 		if (shimBuffer->ipcReqType == 0)
 		{
@@ -447,6 +447,25 @@ namespace coreinit
 		{
 			cemu_assert_unimplemented(); // IOS_IoctlvAsync
 		}
+	}
+
+	FSA_RESULT __FSADecodeIOSErrorToFSA(IOS_ERROR result)
+	{
+		return (FSA_RESULT)result;
+	}
+
+	FSA_RESULT __FSAIPCSubmitCommand(FSAShimBuffer* shimBuffer)
+	{
+		if (shimBuffer->ipcReqType == 0)
+		{
+			IOS_ERROR result = IOS_Ioctl(shimBuffer->fsaDevHandle, shimBuffer->operationType, shimBuffer, 0x520, (uint8*)shimBuffer + 0x580, 0x293);
+			return __FSADecodeIOSErrorToFSA(result);
+		}
+		else
+		{
+			cemu_assert_unimplemented(); // IOS_IoctlvAsync
+		}
+		return FSA_RESULT::FATAL_ERROR;
 	}
 
 	void __FSUpdateQueue(FSCmdQueue* cmdQueue)
@@ -1565,7 +1584,7 @@ namespace coreinit
 		return ret;
 	}
 
-	FSA_RESULT __FSPrepareCmd_GetStatFile(FSAShimBuffer* fsaShimBuffer, IOSDevHandle devHandle, FSFileHandle2 fileHandle, FSStat_t* statOut)
+	FSA_RESULT __FSPrepareCmd_GetStatFile(FSAShimBuffer* fsaShimBuffer, IOSDevHandle devHandle, FSFileHandle2 fileHandle)
 	{
 		if (fsaShimBuffer == NULL)
 			return FSA_RESULT::INVALID_BUFFER;
@@ -1581,7 +1600,7 @@ namespace coreinit
 	{
 		_FSCmdIntro();
 		cemu_assert(statOut); // statOut must not be null
-		__FSPrepareCmd_GetStatFile(&fsCmdBlockBody->fsaShimBuffer, fsClientBody->iosuFSAHandle, fileHandle, statOut);
+		__FSPrepareCmd_GetStatFile(&fsCmdBlockBody->fsaShimBuffer, fsClientBody->iosuFSAHandle, fileHandle);
 		fsCmdBlockBody->returnValueMPTR = _swapEndianU32(memory_getVirtualOffsetFromPointer(statOut));
 		__FSQueueCmd(&fsClientBody->fsCmdQueue, fsCmdBlockBody, FS_CB_PLACEHOLDER_FINISHCMD);
 		return (FSStatus)FS_RESULT::SUCCESS;
@@ -1688,6 +1707,508 @@ namespace coreinit
 		return 0; // no error
 	}
 
+	uint32_t fsaClientCount = 0;
+
+	FSAClientHandle FSAAddClientEx(void* data)
+	{
+		if (data != NULL)
+		{
+			// TODO
+			cemu_assert_unimplemented();
+		}
+
+		IOSDevHandle handle = IOS_Open("/dev/fsa", 0);
+		if (handle != IOS_ERROR::IOS_ERROR_OK)
+		{
+			// TODO
+			cemu_assert_unimplemented();
+			return (FSAClientHandle)FSA_RESULT::PERMISSION_ERROR;
+		}
+
+		// TODO
+
+		return (FSAClientHandle)handle;
+	}
+
+	FSAClientHandle FSAAddClient(void* data)
+	{
+		if (data != NULL)
+		{
+			// uVar1 = OSGetDefaultAppIOQueue();
+			// *(undefined4 *)(param_1 + 8) = uVar1;
+		}
+		return FSAAddClientEx(data);
+	}
+
+	FSA_RESULT FSADelClient(FSAClientHandle clientHandle)
+	{
+		return FSA_RESULT::SUCCESS;
+	}
+
+	SysAllocator<coreinit::IPCBufPool_t*> s_fsaIpcPool;
+	SysAllocator<uint8, 0x37500> s_fsaIpcPoolBuffer;
+	SysAllocator<uint32be> s_fsaIpcPoolBufferNumItems;
+
+	std::mutex sFSAIPCBufferLock;
+	bool s_fsaInitDone = false;
+
+	void FSAInit()
+	{
+		if (!s_fsaInitDone)
+		{
+			s_fsaIpcPool = IPCBufPoolCreate(s_fsaIpcPoolBuffer.GetPtr(), s_fsaIpcPoolBuffer.GetByteSize(), sizeof(FSAShimBuffer), &s_fsaIpcPoolBufferNumItems, 0);
+			s_fsaInitDone = true;
+		}
+	}
+
+	FSA_RESULT FSAShimAllocateBuffer(MEMPTR<MEMPTR<FSAShimBuffer>> outBuffer)
+	{
+		if (!s_fsaInitDone)
+			return FSA_RESULT::NOT_INIT;
+
+		sFSAIPCBufferLock.lock();
+		auto ptr = IPCBufPoolAllocate(s_fsaIpcPool, sizeof(FSAShimBuffer));
+		sFSAIPCBufferLock.unlock();
+
+		if (!ptr)
+			return FSA_RESULT::OUT_OF_RESOURCES;
+
+		std::memset(ptr, 0, sizeof(FSAShimBuffer));
+		outBuffer[0] = reinterpret_cast<FSAShimBuffer*>(ptr);
+		return FSA_RESULT::SUCCESS;
+	}
+
+	FSA_RESULT FSAShimFreeBuffer(FSAShimBuffer* buffer)
+	{
+		sFSAIPCBufferLock.lock();
+		IPCBufPoolFree(s_fsaIpcPool, (uint8_t*)buffer);
+		sFSAIPCBufferLock.unlock();
+		return FSA_RESULT::SUCCESS;
+	}
+
+	FSA_RESULT FSACloseFile(FSAClientHandle client, uint32_t fileHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_CloseFile(shimBuffer->GetPtr(), client, fileHandle);
+		if (result == FSA_RESULT::SUCCESS)
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT __FSPrepareCmd_FlushFile(FSAShimBuffer* fsaShimBuffer, IOSDevHandle fsaHandle, uint32 fileHandle)
+	{
+		if (fsaShimBuffer == nullptr)
+		{
+			return FSA_RESULT::INVALID_BUFFER;
+		}
+		fsaShimBuffer->fsaDevHandle = fsaHandle;
+		fsaShimBuffer->ipcReqType = 0;
+		fsaShimBuffer->operationType = FSA_CMD_OPERATION_TYPE_CLOSEFILE;
+		fsaShimBuffer->ipcData.cmdFlushFile.fileHandle = fileHandle;
+		return FSA_RESULT::SUCCESS;
+	}
+
+	FSA_RESULT FSAFlushFile(FSAClientHandle client, uint32_t fileHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_FlushFile(shimBuffer->GetPtr(), client, fileHandle);
+		if (result == FSA_RESULT::SUCCESS)
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAMakeDir(FSAClientHandle client, const uint8* path, uint32 uknVal660)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_MakeDir(shimBuffer->GetPtr(), client, path, uknVal660);
+		if (result == FSA_RESULT::SUCCESS)
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSARename(FSAClientHandle client, char* oldPath, char* newPath)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_Rename(shimBuffer->GetPtr(), client, oldPath, newPath);
+		if (result == FSA_RESULT::SUCCESS)
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAChangeDir(FSAClientHandle client, char* path)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_ChangeDir(shimBuffer->GetPtr(), client, (uint8_t*)path);
+		if (result == FSA_RESULT::SUCCESS)
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAReadDir(FSAClientHandle client, FSDirHandle2 dirHandle, void* directoryEntry)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_ReadDir(shimBuffer->GetPtr(), client, dirHandle);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+			if (result == FSA_RESULT::SUCCESS)
+			{
+				memcpy(directoryEntry, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 0x164);
+			}
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAOpenDir(FSAClientHandle client, char* path, FSDirHandle2* dirHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_OpenDir(shimBuffer->GetPtr(), client, path);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+			if (result == FSA_RESULT::SUCCESS)
+			{
+				memcpy(dirHandle, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 4);
+			}
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSACloseDir(FSAClientHandle client, FSDirHandle2 dirHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_CloseDir(shimBuffer->GetPtr(), client, dirHandle);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT __FSPrepareCmd_RewindDir(FSAShimBuffer* fsaShimBuffer, IOSDevHandle fsaHandle, FSDirHandle2 dirHandle)
+	{
+		if (fsaShimBuffer == nullptr)
+			return FSA_RESULT::INVALID_BUFFER;
+		fsaShimBuffer->fsaDevHandle = fsaHandle;
+		fsaShimBuffer->ipcReqType = 0;
+		fsaShimBuffer->operationType = FSA_CMD_OPERATION_TYPE_REWINDDIR;
+		fsaShimBuffer->ipcData.cmdRewindDir.dirHandle = dirHandle;
+		return FSA_RESULT::SUCCESS;
+	}
+
+	FSA_RESULT FSARewindDir(FSAClientHandle client, FSDirHandle2 dirHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_RewindDir(shimBuffer->GetPtr(), client, dirHandle);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAOpenFileEx(FSAClientHandle client, char* path, char* mode, uint32 createMode, uint32 openFlag, uint32_t preallocSize, uint32_t* outFileHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_OpenFile(shimBuffer->GetPtr(), client, path, mode, createMode, openFlag, preallocSize);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+			if (result == FSA_RESULT::SUCCESS)
+			{
+				memcpy(outFileHandle, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 4);
+			}
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAGetStatFile(FSAClientHandle client, FSFileHandle2 fileHandle, void* outStat)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_GetStatFile(shimBuffer->GetPtr(), client, fileHandle);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+			if (result == FSA_RESULT::SUCCESS)
+			{
+				memcpy(outStat, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 100);
+			}
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSASetPosFile(FSAClientHandle client, FSFileHandle2 fileHandle, uint32_t pos)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_SetPosFile(shimBuffer->GetPtr(), client, fileHandle, pos);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSATruncateFile(FSAClientHandle client, FSFileHandle2 fileHandle)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_TruncateFile(shimBuffer->GetPtr(), client, fileHandle);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSARemove(FSAClientHandle client, char* path)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_Remove(shimBuffer->GetPtr(), client, (uint8_t*)path);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT __FSPrepareCmd_ChangeMode(FSAShimBuffer* fsaShimBuffer, IOSDevHandle fsaHandle, uint8_t* path, uint32 permission, uint32 permissionMask)
+	{
+		if (fsaShimBuffer == nullptr)
+			return FSA_RESULT::INVALID_BUFFER;
+		if (path == nullptr)
+		{
+			return FSA_RESULT::INVALID_PATH;
+		}
+		fsaShimBuffer->fsaDevHandle = fsaHandle;
+		fsaShimBuffer->ipcReqType = 0;
+		fsaShimBuffer->operationType = FSA_CMD_OPERATION_TYPE_REWINDDIR;
+
+		size_t pathLen = strlen((char*)path);
+
+		for (sint32 i = 0; i < pathLen; i++)
+			fsaShimBuffer->ipcData.cmdChangeMode.path[i] = path[i];
+		for (size_t i = pathLen; i < FSA_CMD_PATH_MAX_LENGTH; i++)
+			fsaShimBuffer->ipcData.cmdChangeMode.path[i] = '\0';
+
+		fsaShimBuffer->ipcData.cmdChangeMode.mode1 = permission;
+		fsaShimBuffer->ipcData.cmdChangeMode.mode2 = permissionMask;
+
+		return FSA_RESULT::SUCCESS;
+	}
+
+	FSA_RESULT FSAChangeMode(FSAClientHandle client, const char* path, uint32 permission)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_ChangeMode(shimBuffer->GetPtr(), client, (uint8_t*)path, permission, 0x666);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAReadFile(FSAClientHandle client, void* buffer, uint32_t size, uint32_t count, FSFileHandle2 handle, uint32_t flags)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_ReadFile(shimBuffer->GetPtr(), client, buffer, size, count, 0, handle, flags & ~0x2);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAWriteFile(FSAClientHandle client, void* buffer, uint32_t size, uint32_t count, FSFileHandle2 handle, uint32_t flags)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_WriteFile(shimBuffer->GetPtr(), client, buffer, size, count, 0, handle, flags & ~0x2);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAGetInfoByQuery(FSAClientHandle client, char* path, uint32_t queryType, void* outData)
+	{
+		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
+		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
+		if (result != FSA_RESULT::SUCCESS)
+			return result;
+
+		result = __FSPrepareCmd_QueryInfo(shimBuffer->GetPtr(), client, (uint8_t*)path, queryType);
+		if (result == FSA_RESULT::SUCCESS)
+		{
+			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+			if (result == FSA_RESULT::SUCCESS)
+			{
+				if (queryType == FSA_QUERY_TYPE_FREESPACE)
+				{
+					memcpy(outData, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 8);
+				}
+				else if (queryType == FSA_QUERY_TYPE_DEVICE_INFO)
+				{
+					memcpy(outData, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 0x28);
+				}
+				else if (queryType == FSA_QUERY_TYPE_STAT)
+				{
+					memcpy(outData, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 100);
+				}
+				else
+				{
+					// TODO: implement other query types
+					cemu_assert_unimplemented();
+					result = FSA_RESULT::FATAL_ERROR;
+				}
+			}
+		}
+
+		FSAShimFreeBuffer(shimBuffer->GetPtr());
+		return result;
+	}
+
+	FSA_RESULT FSAGetStat(FSAClientHandle client, char* path, void* outStat)
+	{
+		return FSAGetInfoByQuery(client, path, FSA_QUERY_TYPE_STAT, outStat);
+	}
+
+	FSA_RESULT FSAGetFreeSpaceSize(FSAClientHandle client, char* path, void* outSize)
+	{
+		return FSAGetInfoByQuery(client, path, FSA_QUERY_TYPE_DEVICE_INFO, outSize);
+	}
+
+	FSA_RESULT FSAGetDeviceInfo(FSAClientHandle client, char* path, void* outSize)
+	{
+		return FSAGetInfoByQuery(client, path, FSA_QUERY_TYPE_FREESPACE, outSize);
+	}
+
+	SysAllocator<char, 64> s_fsaStrStub;
+
+	const char* FSAGetStatusStr(FSA_RESULT status)
+	{
+		return s_fsaStrStub.GetPtr();
+	}
+
+	FSA_RESULT FSAMount(FSAClientHandle client, const char* source, const char* target, uint32 flags, void* arg_buf, uint32_t arg_len)
+	{
+		if ("/dev/sdcard01" == std::string_view(source) && "/vol/external01" == std::string_view(target) && flags == 0 && arg_buf == nullptr && arg_len == 0)
+		{
+			mountSDCard();
+			return FSA_RESULT::SUCCESS;
+		} else {
+			cemu_assert_unimplemented();
+		}
+
+		return FSA_RESULT::FATAL_ERROR;
+	}
+
+	FSA_RESULT FSAUnmount(FSAClientHandle client,
+						  const char *mountedTarget,
+						  uint32 flags) {
+		return FSA_RESULT::SUCCESS;
+	}
+
 	void InitializeFS()
 	{
 		cafeExportRegister("coreinit", FSInit, LogType::CoreinitFile);
@@ -1747,7 +2268,7 @@ namespace coreinit
 		cafeExportRegister("coreinit", FSChangeDirAsync, LogType::CoreinitFile);
 		cafeExportRegister("coreinit", FSChangeDir, LogType::CoreinitFile);
 		cafeExportRegister("coreinit", FSGetCwdAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetCwd, LogType::CoreinitFile);		
+		cafeExportRegister("coreinit", FSGetCwd, LogType::CoreinitFile);
 
 		cafeExportRegister("coreinit", FSIsEofAsync, LogType::CoreinitFile);
 		cafeExportRegister("coreinit", FSIsEof, LogType::CoreinitFile);
@@ -1759,7 +2280,7 @@ namespace coreinit
 		cafeExportRegister("coreinit", FSReadDir, LogType::CoreinitFile);
 		cafeExportRegister("coreinit", FSCloseDirAsync, LogType::CoreinitFile);
 		cafeExportRegister("coreinit", FSCloseDir, LogType::CoreinitFile);
-		
+
 		// stat
 		cafeExportRegister("coreinit", FSGetFreeSpaceSizeAsync, LogType::CoreinitFile);
 		cafeExportRegister("coreinit", FSGetFreeSpaceSize, LogType::CoreinitFile);
@@ -1783,6 +2304,36 @@ namespace coreinit
 		cafeExportRegister("coreinit", FSGetErrorCodeForViewer, LogType::Placeholder);
 		cafeExportRegister("coreinit", FSGetLastErrorCodeForViewer, LogType::Placeholder);
 
+		cafeExportRegister("coreinit", FSAMakeDir, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAInit, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAAddClient, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSADelClient, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSARewindDir, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAGetDeviceInfo, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSARename, LogType::Placeholder);
+
+		cafeExportRegister("coreinit", FSAChangeDir, LogType::Placeholder);
+
+		cafeExportRegister("coreinit", FSAMount, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAUnmount, LogType::Placeholder);
+
+		cafeExportRegister("coreinit", FSAChangeMode, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAReadDir, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAOpenDir, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSACloseDir, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSACloseFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAFlushFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAOpenFileEx, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAGetStatFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAGetFreeSpaceSize, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSASetPosFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSATruncateFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSARemove, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAReadFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAWriteFile, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAGetStat, LogType::Placeholder);
+		cafeExportRegister("coreinit", FSAGetStatusStr, LogType::Placeholder);
+
 		g_fsRegisteredClientBodies = nullptr;
 	}
-}
+} // namespace coreinit

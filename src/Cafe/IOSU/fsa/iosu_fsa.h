@@ -59,6 +59,18 @@ namespace iosu
 				}cmdCloseFile;
 				struct
 				{
+					uint32 ukn0000; // +0x000
+					uint32be fileHandle; // +0x004
+				}cmdFlushFile;
+				struct
+				{
+					uint32 ukn0000;
+					uint8 path[FSA_CMD_PATH_MAX_LENGTH];
+					uint32 mode1; // +0x284
+					uint32 mode2; // +0x288
+				}cmdChangeMode;
+				struct
+				{
 					uint32 ukn0000;
 					uint8 path[FSA_CMD_PATH_MAX_LENGTH];
 					uint32 ukn0284;
@@ -84,6 +96,11 @@ namespace iosu
 					uint32 ukn0000;
 					betype<uint32> dirHandle;
 				}cmdReadDir;
+				struct
+				{
+					uint32 ukn0000;
+					betype<uint32> dirHandle;
+				}cmdRewindDir;
 				struct
 				{
 					uint32 ukn0000;

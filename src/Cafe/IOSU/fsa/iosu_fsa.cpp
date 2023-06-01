@@ -413,6 +413,12 @@ namespace iosu
 				delete fscFile;
 				return FSA_RESULT::SUCCESS;
 			}
+			else if (queryType == FSA_QUERY_TYPE_DEVICE_INFO)
+			{
+				// TODO
+				cemu_assert_unimplemented();
+				return FSA_RESULT::FATAL_ERROR;
+			}
 			else
 				cemu_assert_unimplemented();
 			return FSA_convertFSCtoFSAStatus(fscStatus);
