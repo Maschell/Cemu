@@ -436,11 +436,11 @@ namespace coreinit
 
 	void __FSAIoctlResponseCallback(PPCInterpreter_t* hCPU);
 
-	void __FSAIPCSubmitCommand(FSCmdBlockBody_t* cmd)
+	void __FSAIPCSubmitCommandAsync(FSAShimBuffer* shimBuffer, const MEMPTR<void>& callback, void * context)
 	{
-		if (cmd->fsaShimBuffer.ipcReqType == 0)
+		if (shimBuffer->ipcReqType == 0)
 		{
-			IOS_ERROR r = IOS_IoctlAsync(cmd->fsaShimBuffer.fsaDevHandle, cmd->fsaShimBuffer.operationType, cmd, 0x520, (uint8*)cmd + 0x580, 0x293, MEMPTR<void>(PPCInterpreter_makeCallableExportDepr(__FSAIoctlResponseCallback)), cmd);
+			IOS_ERROR r = IOS_IoctlAsync(shimBuffer->fsaDevHandle, shimBuffer->operationType, shimBuffer, 0x520, (uint8*)shimBuffer + 0x580, 0x293, callback, context);
 			cemu_assert(!IOS_ResultIsError(r));
 		}
 		else
@@ -461,7 +461,7 @@ namespace coreinit
 				if (cmdQueue->numCommandsInFlight >= cmdQueue->numMaxCommandsInFlight)
 					cmdQueue->queueFlags = cmdQueue->queueFlags | FSCmdQueue::QUEUE_FLAG::IS_FULL;
 				cemu_assert_debug(cmdQueue->dequeueHandlerFuncMPTR == 0); // not supported. We HLE call the handler here
-				__FSAIPCSubmitCommand(dequeuedCommand);
+				__FSAIPCSubmitCommandAsync(&dequeuedCommand->fsaShimBuffer, MEMPTR<void>(PPCInterpreter_makeCallableExportDepr(__FSAIoctlResponseCallback)), &dequeuedCommand->fsaShimBuffer);
 			}
 		}
 		FSUnlockMutex();
