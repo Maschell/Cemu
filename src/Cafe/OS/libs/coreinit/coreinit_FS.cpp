@@ -1718,7 +1718,7 @@ namespace coreinit
 		}
 
 		IOSDevHandle handle = IOS_Open("/dev/fsa", 0);
-		if (handle != IOS_ERROR::IOS_ERROR_OK)
+		if (handle <= IOS_ERROR::IOS_ERROR_OK)
 		{
 			// TODO
 			cemu_assert_unimplemented();
@@ -1746,7 +1746,7 @@ namespace coreinit
 	}
 
 	SysAllocator<coreinit::IPCBufPool_t*> s_fsaIpcPool;
-	SysAllocator<uint8, 0x37500> s_fsaIpcPoolBuffer;
+	SysAllocator<uint8, 0x3C000> s_fsaIpcPoolBuffer;
 	SysAllocator<uint32be> s_fsaIpcPoolBufferNumItems;
 
 	std::mutex sFSAIPCBufferLock;
@@ -1756,7 +1756,7 @@ namespace coreinit
 	{
 		if (!s_fsaInitDone)
 		{
-			s_fsaIpcPool = IPCBufPoolCreate(s_fsaIpcPoolBuffer.GetPtr(), s_fsaIpcPoolBuffer.GetByteSize(), sizeof(FSAShimBuffer), &s_fsaIpcPoolBufferNumItems, 0);
+			s_fsaIpcPool = IPCBufPoolCreate(s_fsaIpcPoolBuffer.GetPtr(), s_fsaIpcPoolBuffer.GetByteSize(), sizeof(FSCmdBlockBody_t), &s_fsaIpcPoolBufferNumItems, 0);
 			s_fsaInitDone = true;
 		}
 	}
@@ -1767,7 +1767,7 @@ namespace coreinit
 			return FSA_RESULT::NOT_INIT;
 
 		sFSAIPCBufferLock.lock();
-		auto ptr = IPCBufPoolAllocate(s_fsaIpcPool, sizeof(FSAShimBuffer));
+		auto ptr = IPCBufPoolAllocate(s_fsaIpcPool, sizeof(FSCmdBlockBody_t));
 		sFSAIPCBufferLock.unlock();
 
 		if (!ptr)
@@ -1881,35 +1881,29 @@ namespace coreinit
 		if (result != FSA_RESULT::SUCCESS)
 			return result;
 
+		((FSCmdBlockBody_t*)shimBuffer->GetPtr())->returnValueMPTR = _swapEndianU32(memory_getVirtualOffsetFromPointer(directoryEntry));
 		result = __FSPrepareCmd_ReadDir(shimBuffer->GetPtr(), client, dirHandle);
 		if (result == FSA_RESULT::SUCCESS)
 		{
 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
-			if (result == FSA_RESULT::SUCCESS)
-			{
-				memcpy(directoryEntry, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 0x164);
-			}
 		}
 
 		FSAShimFreeBuffer(shimBuffer->GetPtr());
 		return result;
 	}
 
-	FSA_RESULT FSAOpenDir(FSAClientHandle client, char* path, FSDirHandle2* dirHandle)
+	FSA_RESULT FSAOpenDir(FSAClientHandle client, char* path, FSDirHandlePtr dirHandleOut)
 	{
 		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
 		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
 		if (result != FSA_RESULT::SUCCESS)
 			return result;
 
+		((FSCmdBlockBody_t*)shimBuffer->GetPtr())->returnValueMPTR = _swapEndianU32(dirHandleOut.GetMPTR());
 		result = __FSPrepareCmd_OpenDir(shimBuffer->GetPtr(), client, path);
 		if (result == FSA_RESULT::SUCCESS)
 		{
 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
-			if (result == FSA_RESULT::SUCCESS)
-			{
-				memcpy(dirHandle, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 4);
-			}
 		}
 
 		FSAShimFreeBuffer(shimBuffer->GetPtr());
@@ -1961,21 +1955,18 @@ namespace coreinit
 		return result;
 	}
 
-	FSA_RESULT FSAOpenFileEx(FSAClientHandle client, char* path, char* mode, uint32 createMode, uint32 openFlag, uint32_t preallocSize, uint32_t* outFileHandle)
+	FSA_RESULT FSAOpenFileEx(FSAClientHandle client, char* path, char* mode, uint32 createMode, uint32 openFlag, uint32_t preallocSize, FSFileHandleDepr_t* fileHandle)
 	{
 		StackAllocator<MEMPTR<FSAShimBuffer>, 1> shimBuffer;
 		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
 		if (result != FSA_RESULT::SUCCESS)
 			return result;
 
+		((FSCmdBlockBody_t*)shimBuffer->GetPtr())->returnValueMPTR = _swapEndianU32(memory_getVirtualOffsetFromPointer(fileHandle));
 		result = __FSPrepareCmd_OpenFile(shimBuffer->GetPtr(), client, path, mode, createMode, openFlag, preallocSize);
 		if (result == FSA_RESULT::SUCCESS)
 		{
 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
-			if (result == FSA_RESULT::SUCCESS)
-			{
-				memcpy(outFileHandle, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 4);
-			}
 		}
 
 		FSAShimFreeBuffer(shimBuffer->GetPtr());
@@ -1989,14 +1980,11 @@ namespace coreinit
 		if (result != FSA_RESULT::SUCCESS)
 			return result;
 
+		((FSCmdBlockBody_t*)shimBuffer->GetPtr())->returnValueMPTR = _swapEndianU32(memory_getVirtualOffsetFromPointer(outStat));
 		result = __FSPrepareCmd_GetStatFile(shimBuffer->GetPtr(), client, fileHandle);
 		if (result == FSA_RESULT::SUCCESS)
 		{
 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
-			if (result == FSA_RESULT::SUCCESS)
-			{
-				memcpy(outStat, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 100);
-			}
 		}
 
 		FSAShimFreeBuffer(shimBuffer->GetPtr());
@@ -2137,31 +2125,11 @@ namespace coreinit
 		if (result != FSA_RESULT::SUCCESS)
 			return result;
 
+		((FSCmdBlockBody_t*)shimBuffer->GetPtr())->returnValueMPTR = _swapEndianU32(memory_getVirtualOffsetFromPointer(outData));
 		result = __FSPrepareCmd_QueryInfo(shimBuffer->GetPtr(), client, (uint8_t*)path, queryType);
 		if (result == FSA_RESULT::SUCCESS)
 		{
 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
-			if (result == FSA_RESULT::SUCCESS)
-			{
-				if (queryType == FSA_QUERY_TYPE_FREESPACE)
-				{
-					memcpy(outData, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 8);
-				}
-				else if (queryType == FSA_QUERY_TYPE_DEVICE_INFO)
-				{
-					memcpy(outData, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 0x28);
-				}
-				else if (queryType == FSA_QUERY_TYPE_STAT)
-				{
-					memcpy(outData, ((uint8_t*)shimBuffer.GetPointer()) + 0x584, 100);
-				}
-				else
-				{
-					// TODO: implement other query types
-					cemu_assert_unimplemented();
-					result = FSA_RESULT::FATAL_ERROR;
-				}
-			}
 		}
 
 		FSAShimFreeBuffer(shimBuffer->GetPtr());

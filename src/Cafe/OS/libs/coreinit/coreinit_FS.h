@@ -193,6 +193,8 @@ namespace coreinit
 		uint32 ukn0934;
 	};
 
+	static_assert(sizeof(FSAShimBuffer) == 0x938);
+
 	struct FSCmdBlockBody_t
 	{
 		FSAShimBuffer fsaShimBuffer;
@@ -228,6 +230,8 @@ namespace coreinit
 		/* +0x9F8 */ MEMPTR<FSCmdBlock_t> selfCmdBlock;
 		uint32 ukn9FC;
 	};
+
+	static_assert(sizeof(FSCmdBlockBody_t) == 0xA00);
 
 	static_assert(sizeof(FSAsyncParams_t) == 0xC);
 	static_assert(sizeof(FSCmdBlock_t) == 0xA80);
